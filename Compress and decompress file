@@ -1,0 +1,126 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <sstream>
+#include <algorithm>
+
+std::mutex write_mutex;
+const size_t CHUNK_SIZE = 256 * 1024; 
+
+std::string rle_compress(const std::string& data) {
+    std::ostringstream out;
+    size_t i = 0;
+    while (i < data.size()) {
+        char current = data[i];
+        size_t count = 1;
+        while (i + count < data.size() && data[i + count] == current)
+            count++;
+        out << current << count;
+        i += count;
+    }
+    return out.str();
+}
+
+std::string rle_decompress(const std::string& data) {
+    std::ostringstream out;
+    size_t i = 0;
+    while (i < data.size()) {
+        char ch = data[i++];
+        std::string count_str;
+        while (i < data.size() && isdigit(data[i]))
+            count_str += data[i++];
+        int count = std::stoi(count_str);
+        out << std::string(count, ch);
+    }
+    return out.str();
+}
+
+void compress_chunk(const std::string& input_file, const std::string& output_file, size_t start, size_t size) {
+    std::ifstream in(input_file, std::ios::binary);
+    if (!in) {
+        std::cerr << "Error opening input file.\n";
+        return;
+    }
+
+    in.seekg(start);
+    std::vector<char> buffer(size);
+    in.read(buffer.data(), size);
+    size_t bytes_read = in.gcount();
+
+    std::string input_data(buffer.begin(), buffer.begin() + bytes_read);
+    std::string compressed = rle_compress(input_data);
+
+    std::lock_guard<std::mutex> lock(write_mutex);
+    std::ofstream out(output_file, std::ios::binary | std::ios::app);
+    size_t len = compressed.size();
+    out.write(reinterpret_cast<char*>(&len), sizeof(len));
+    out.write(compressed.c_str(), len);
+}
+
+void compress_file(const std::string& input, const std::string& output, int threads) {
+    std::ifstream in(input, std::ios::binary | std::ios::ate);
+    size_t file_size = in.tellg();
+    in.close();
+
+    size_t chunk_size = std::min(CHUNK_SIZE, file_size / threads);
+    std::vector<std::thread> thread_pool;
+
+    std::ofstream clear(output, std::ios::trunc);
+    clear.close();
+
+    for (int i = 0; i < threads; ++i) {
+        size_t start = i * chunk_size;
+        if (start >= file_size) break;
+        size_t size = (i == threads - 1) ? (file_size - start) : chunk_size;
+        thread_pool.emplace_back(compress_chunk, input, output, start, size);
+    }
+
+    for (auto& t : thread_pool) t.join();
+
+    std::cout << "✅ Compression complete: " << output << "\n";
+}
+
+void decompress_file(const std::string& input_file, const std::string& output_file) {
+    std::ifstream in(input_file, std::ios::binary);
+    std::ofstream out(output_file, std::ios::binary);
+
+    while (in.peek() != EOF) {
+        size_t len;
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        if (in.gcount() == 0) break;
+
+        std::string compressed(len, '\0');
+        in.read(&compressed[0], len);
+
+        std::string decompressed = rle_decompress(compressed);
+        out.write(decompressed.c_str(), decompressed.size());
+    }
+
+    std::cout << "✅ Decompression complete: " << output_file << "\n";
+}
+
+int main() {
+    std::string input_file = "input.txt";
+    std::string compressed_file = "compressed.rle";
+    std::string decompressed_file = "decompressed.txt";
+    int threads = 4;
+
+    std::ofstream sample(input_file);
+    sample << "AAAAABBBBBCCCCCCCCCCDDDDDEEEEAAAAABBBBBCCCCCCCCCCDDDDDEEEE";
+    sample.close();
+
+    compress_file(input_file, compressed_file, threads);
+
+    decompress_file(compressed_file, decompressed_file);
+
+    std::ifstream result(decompressed_file);
+    std::string line;
+    std::cout << "\n📝 Decompressed output:\n";
+    while (std::getline(result, line)) {
+        std::cout << line << "\n";
+    }
+
+    return 0;
+}
