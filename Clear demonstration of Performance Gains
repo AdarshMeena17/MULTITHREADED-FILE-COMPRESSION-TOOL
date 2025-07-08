@@ -1,0 +1,128 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <sstream>
+#include <chrono>
+#include <algorithm>
+
+std::mutex write_mutex;
+const size_t CHUNK_SIZE = 256 * 1024; 
+
+std::string rle_compress(const std::string& data) {
+    std::ostringstream out;
+    size_t i = 0;
+    while (i < data.size()) {
+        char current = data[i];
+        size_t count = 1;
+        while (i + count < data.size() && data[i + count] == current)
+            count++;
+        out << current << count;
+        i += count;
+    }
+    return out.str();
+}
+
+std::string rle_decompress(const std::string& data) {
+    std::ostringstream out;
+    size_t i = 0;
+    while (i < data.size()) {
+        char ch = data[i++];
+        std::string count_str;
+        while (i < data.size() && isdigit(data[i]))
+            count_str += data[i++];
+        int count = std::stoi(count_str);
+        out << std::string(count, ch);
+    }
+    return out.str();
+}
+void compress_chunk(const std::string& input_file, const std::string& output_file, size_t start, size_t size) {
+    std::ifstream in(input_file, std::ios::binary);
+    if (!in) return;
+    in.seekg(start);
+
+    std::vector<char> buffer(size);
+    in.read(buffer.data(), size);
+    size_t bytes_read = in.gcount();
+
+    std::string input_data(buffer.begin(), buffer.begin() + bytes_read);
+    std::string compressed = rle_compress(input_data);
+
+    std::lock_guard<std::mutex> lock(write_mutex);
+    std::ofstream out(output_file, std::ios::binary | std::ios::app);
+    size_t len = compressed.size();
+    out.write(reinterpret_cast<char*>(&len), sizeof(len));
+    out.write(compressed.c_str(), len);
+}
+
+void compress_multithreaded(const std::string& input_file, const std::string& output_file, int threads) {
+    std::ifstream in(input_file, std::ios::binary | std::ios::ate);
+    size_t file_size = in.tellg();
+    in.close();
+
+    size_t chunk_size = std::min(CHUNK_SIZE, file_size / threads);
+    std::vector<std::thread> thread_pool;
+
+    std::ofstream clear(output_file, std::ios::trunc);
+    clear.close();
+
+    for (int i = 0; i < threads; ++i) {
+        size_t start = i * chunk_size;
+        if (start >= file_size) break;
+        size_t size = (i == threads - 1) ? (file_size - start) : chunk_size;
+        thread_pool.emplace_back(compress_chunk, input_file, output_file, start, size);
+    }
+
+    for (auto& t : thread_pool) t.join();
+}
+
+void compress_singlethreaded(const std::string& input_file, const std::string& output_file) {
+    std::ifstream in(input_file, std::ios::binary);
+    std::ofstream out(output_file, std::ios::binary | std::ios::trunc);
+
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    std::string data = buffer.str();
+    std::string compressed = rle_compress(data);
+
+    size_t len = compressed.size();
+    out.write(reinterpret_cast<char*>(&len), sizeof(len));
+    out.write(compressed.c_str(), len);
+}
+
+void benchmark() {
+    const std::string input_file = "input.txt";
+    const std::string out_single = "compressed_single.rle";
+    const std::string out_multi = "compressed_multi.rle";
+    const int threads = 4;
+
+    std::ofstream gen(input_file);
+    for (int i = 0; i < 5000000; ++i) 
+        gen << "AAAAABBBCCDDDDDDDEEEE";
+    gen.close();
+
+    auto start1 = std::chrono::high_resolution_clock::now();
+    compress_singlethreaded(input_file, out_single);
+    auto end1 = std::chrono::high_resolution_clock::now();
+    double time_single = std::chrono::duration<double>(end1 - start1).count();
+
+    auto start2 = std::chrono::high_resolution_clock::now();
+    compress_multithreaded(input_file, out_multi, threads);
+    auto end2 = std::chrono::high_resolution_clock::now();
+    double time_multi = std::chrono::duration<double>(end2 - start2).count();
+
+    std::cout << "\n📊 PERFORMANCE COMPARISON:\n";
+    std::cout << "Single-threaded time: " << time_single << " seconds\n";
+    std::cout << "Multi-threaded time : " << time_multi << " seconds\n";
+
+    if (time_multi < time_single)
+        std::cout << "✅ Multithreading is faster by " << (time_single - time_multi) << " seconds\n";
+    else
+        std::cout << "❗ Multithreading was not faster (small file or overhead)\n";
+}
+
+int main() {
+    benchmark();
+    return 0;
+}
